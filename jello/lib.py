@@ -56,6 +56,7 @@ class opts:
     keyword_color = None
     number_color = None
     string_color = None
+    query_each_line = None
 
 
 class JelloTheme:

@@ -5,6 +5,7 @@ import sys
 import signal
 import shutil
 import textwrap
+from io import StringIO
 from textwrap import TextWrapper
 import jello
 from jello.lib import opts, load_json, read_file, pyquery, Schema, Json
@@ -15,12 +16,24 @@ def ctrlc(signum, frame):
     sys.exit(1)
 
 
-def get_stdin():
+def get_stdin(input_stream):
     """return STDIN data"""
-    if sys.stdin.isatty():
+    if input_stream.isatty():
         return None
     else:
-        return sys.stdin.read()
+        return input_stream.read()
+
+def get_stream_lines(input_stream):
+    while True:
+        output = StringIO()
+        char = input_stream.read(1)
+        while char and char != '\n':
+            if not char:
+                return
+            output.write(char)
+            char = input_stream.read(1)
+        yield output.getvalue()
+
 
 
 def print_help():
@@ -44,6 +57,7 @@ def print_help():
                 -s   print the JSON schema in grep-able format
                 -t   print type annotations in schema view
                 -v   version info
+                -j   each line of input is a JSON object queried separately
                 -h   help
 
         Use '_' as the input data and use python dict and list bracket syntax
@@ -105,98 +119,7 @@ def print_exception(e=None, data='', query='', response='', ex_type='Runtime'):
     print(exception_message, file=sys.stderr)
     sys.exit(1)
 
-
-def main(data=None, query='_'):
-    # break on ctrl-c keyboard interrupt
-    signal.signal(signal.SIGINT, ctrlc)
-
-    # break on pipe error. need try/except for windows compatibility
-    try:
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    except AttributeError:
-        pass
-
-    # enable colors for Windows cmd.exe terminal
-    if sys.platform.startswith('win32'):
-        os.system('')
-
-    if data is None:
-        data = get_stdin()
-
-    options = []
-    long_options = {}
-    arg_section = ''  # can be query_file or data_files
-
-    for arg in sys.argv[1:]:
-        if arg == '-q':
-            arg_section = 'query_file'
-
-        elif arg == '-f':
-            data = ''
-            arg_section = 'data_files'
-
-        elif arg_section == 'query_file':
-            try:
-                query = read_file(arg)
-            except Exception as e:
-                print_error(f'jello:  Issue reading query file: {e}')
-            finally:
-                arg_section = ''
-
-        elif arg_section == 'data_files':
-            try:
-                data += '\n' + read_file(arg)
-            except Exception as e:
-                print_error(f'jello:  Issue reading data file: {e}')
-
-        elif arg.startswith('-') and not arg.startswith('--'):
-             options.extend(arg[1:])
-             arg_section = ''
-
-        elif arg.startswith('--'):
-            try:
-                k, v = arg[2:].split('=')
-                long_options[k] = int(v)
-                arg_section = ''
-            except Exception:
-                print_help()
-
-        else:
-            query = arg
-            arg_section = ''
-
-    opts.compact = opts.compact or 'c' in options
-    opts.initialize = opts.initialize or 'i' in options
-    opts.lines = opts.lines or 'l' in options
-    opts.empty = opts.empty or 'e' in options
-    opts.force_color = opts.force_color or 'C' in options
-    opts.mono = opts.mono or ('m' in options or bool(os.getenv('NO_COLOR')))
-    opts.nulls = opts.nulls or 'n' in options
-    opts.raw = opts.raw or 'r' in options
-    opts.schema = opts.schema or 's' in options
-    opts.types = opts.types or 't' in options
-    opts.version_info = opts.version_info or 'v' in options
-    opts.helpme = opts.helpme or 'h' in options
-
-    if opts.helpme:
-        print_help()
-
-    if opts.version_info:
-        print(textwrap.dedent(f'''\
-            jello:  Version: {jello.__version__}
-                    Author: {jello.AUTHOR}
-                    Website: {jello.WEBSITE}
-                    Copyright: {jello.COPYRIGHT}
-                    License: {jello.LICENSE}
-        '''))
-        sys.exit()
-
-    if data is None and not opts.empty:
-        print_error('jello:  Missing JSON or JSON Lines data via STDIN or file via -f option.\n')
-
-    if opts.empty:
-        data = '{}'
-
+def handle_query(data:str, query:str):
     # load the JSON or JSON Lines into a dict or list of dicts
     try:
         data = load_json(data)
@@ -237,6 +160,115 @@ def main(data=None, query='_'):
 
     except Exception as e:
         print_exception(e, data, query, response, ex_type='Output')
+
+
+
+def main(data=None, query='_', input_stream=sys.stdin):
+    # break on ctrl-c keyboard interrupt
+    signal.signal(signal.SIGINT, ctrlc)
+
+    # break on pipe error. need try/except for windows compatibility
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except AttributeError:
+        pass
+
+    # enable colors for Windows cmd.exe terminal
+    if sys.platform.startswith('win32'):
+        os.system('')
+
+    if data is None:
+        data = ''
+
+    options = []
+    long_options = {}
+    ignore_stdin = False
+    arg_section = ''  # can be query_file or data_files
+
+    for arg in sys.argv[1:]:
+        if arg == '-q':
+            arg_section = 'query_file'
+
+        elif arg == '-f':
+            data = ''
+            ignore_stdin = True
+            arg_section = 'data_files'
+
+        elif arg_section == 'query_file':
+            try:
+                query = read_file(arg)
+            except Exception as e:
+                print_error(f'jello:  Issue reading query file: {e}')
+            finally:
+                arg_section = ''
+
+        elif arg_section == 'data_files':
+            try:
+                data += '\n' + read_file(arg)
+            except Exception as e:
+                print_error(f'jello:  Issue reading data file: {e}')
+
+        elif arg.startswith('-') and not arg.startswith('--'):
+             options.extend(arg[1:])
+             arg_section = ''
+
+        elif arg.startswith('--'):
+            try:
+                k, v = arg[2:].split('=')
+                long_options[k] = int(v)
+                arg_section = ''
+            except Exception:
+                print_help()
+
+        else:
+            query = arg
+            arg_section = ''
+
+    if 'j' not in options and not ignore_stdin:
+        stdin_data = get_stdin(input_stream)
+        data = data + '\n' + (stdin_data or '')
+
+    opts.compact = opts.compact or 'c' in options
+    opts.initialize = opts.initialize or 'i' in options
+    opts.lines = opts.lines or 'l' in options
+    opts.empty = opts.empty or 'e' in options
+    opts.force_color = opts.force_color or 'C' in options
+    opts.mono = opts.mono or ('m' in options or bool(os.getenv('NO_COLOR')))
+    opts.nulls = opts.nulls or 'n' in options
+    opts.raw = opts.raw or 'r' in options
+    opts.schema = opts.schema or 's' in options
+    opts.types = opts.types or 't' in options
+    opts.version_info = opts.version_info or 'v' in options
+    opts.helpme = opts.helpme or 'h' in options
+    opts.query_each_line = opts.query_each_line or 'j' in options
+
+    if opts.helpme:
+        print_help()
+
+    if opts.version_info:
+        print(textwrap.dedent(f'''\
+            jello:  Version: {jello.__version__}
+                    Author: {jello.AUTHOR}
+                    Website: {jello.WEBSITE}
+                    Copyright: {jello.COPYRIGHT}
+                    License: {jello.LICENSE}
+        '''))
+        sys.exit()
+
+    if data is None and not opts.empty:
+        print_error('jello:  Missing JSON or JSON Lines data via STDIN or file via -f option.\n')
+
+    if opts.empty:
+        data = '{}'
+
+
+    if opts.query_each_line:
+        for line in get_stream_lines(input_stream):
+            if not line:
+                break
+            handle_query(line, query)
+    else:
+        handle_query(data, query)
 
 
 if __name__ == '__main__':
